@@ -162,6 +162,12 @@ fn read_stdin() -> Result<String, io::Error> {
     Ok(buffer)
 }
 
+enum SolverResult {
+    Satisfied,
+    Unsatisfied,
+    Error(String),
+}
+
 fn main() -> Result<(), ParseError> {
     #[cfg(feature = "env_logger")]
     env_logger::init();
@@ -170,7 +176,7 @@ fn main() -> Result<(), ParseError> {
     let search_options = params.get_search_options();
     let (source, content) = params.get_content()?;
 
-    match source {
+    let result = match source {
         Source::LocalFile => run(
             &parser::DetectedParser::with_content(&content)?,
             search_options,
@@ -181,22 +187,34 @@ fn main() -> Result<(), ParseError> {
             search_options,
         ),
     };
-    Ok(())
+
+    match result {
+        // print the result
+        SolverResult::Satisfied => Ok(()),
+        SolverResult::Unsatisfied => {
+            std::process::exit(2);
+        }
+        SolverResult::Error(err_msg) => {
+            eprintln!("Error: {}", err_msg);
+            std::process::exit(1);
+        }
+    }
 }
 
-fn run<P>(board_parser: &P, search_options: SearchOptions)
+fn run<P>(board_parser: &P, search_options: SearchOptions) -> SolverResult
 where
     P: BoardParser,
 {
-    match board_parser.infer_scheme() {
+    let result = match board_parser.infer_scheme() {
         PuzzleScheme::BlackAndWhite => {
             run_with_block::<BinaryBlock, _>(board_parser, search_options)
         }
         PuzzleScheme::MultiColor => run_with_block::<ColoredBlock, _>(board_parser, search_options),
-    }
+    };
+    return result;
 }
 
-fn run_with_block<B, P>(board_parser: &P, search_options: SearchOptions)
+fn run_with_block<B, P>(board_parser: &P, search_options: SearchOptions) -> SolverResult
 where
     B: 'static + Block + Display,
     B::Color: DynamicColor + Display,
@@ -212,17 +230,22 @@ where
 
     #[cfg(not(feature = "sat"))]
     {
-        let backtracking = solver::run::<_, DynamicSolver<_>, FullProbe1<_>>(
+        let backtracking = match solver::run::<_, DynamicSolver<_>, FullProbe1<_>>(
             MutRc::clone(&board),
             search_options.0,
             search_options.1,
             search_options.2,
-        )
-        .unwrap();
+        ) {
+            Ok(res) => res,
+            Err(err) => return SolverResult::Error(format!("Solver failed: {}", err)),
+        };
+
         println!("{}", r.render());
 
         if let Some(backtracking) = backtracking {
             let solutions = backtracking.solutions;
+
+            // If there are multiple solutions or the board isn't fully solved
             if !solutions.is_empty() && (!board.read().is_solved_full() || solutions.len() > 1) {
                 println!("Backtracking found {} solutions:", solutions.len());
                 for (i, solution) in solutions.into_iter().enumerate() {
@@ -235,6 +258,9 @@ where
                     println!("{}-th solution:", i + 1);
                     println!("{}", r.render_simple());
                 }
+
+                // Return unsatisfied right after printing solutions
+                return SolverResult::Unsatisfied;
             }
 
             if log::log_enabled!(log::Level::Warn) {
@@ -244,6 +270,14 @@ where
                 }
             }
         }
+    }
+
+    // If we've made it to this point and the board is fully solved with only one solution
+    if board.read().is_solved_full() {
+        return SolverResult::Satisfied;
+    } else {
+        // This could be an unsatisfied state or a special error state, depending on your requirements
+        return SolverResult::Unsatisfied;
     }
 
     #[cfg(feature = "sat")]
